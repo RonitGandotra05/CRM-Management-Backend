@@ -1,0 +1,7 @@
+boto3==1.26.12
+psycopg2==2.9.5
+pyjwt==2.7.0
+python-dotenv==1.0.0
+fastapi==0.95.0
+uvicorn==0.22.0
+pydantic==2.0.0

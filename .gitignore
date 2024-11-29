@@ -1,0 +1,45 @@
+# Python bytecode files
+*.pyc
+*.pyo
+*.pyd
+__pycache__/
+*.pycache/
+
+# Virtual environment directories
+venv/
+.env/
+
+# Database files
+*.db
+*.sqlite3
+
+# Uvicorn logs
+*.log
+
+# IDE and editor files
+.vscode/
+.idea/
+
+# OS generated files
+.DS_Store
+Thumbs.db
+
+# FastAPI and Python-related file cache
+*.egg-info/
+dist/
+build/
+
+# .env file for secret keys and API tokens (ensure this is never pushed to the repo)
+.env
+
+# Jupyter Notebook checkpoints
+.ipynb_checkpoints/
+
+# Coverage reports
+.coverage
+.coverage.*
+*.hypothesis/
+
+# MySQL/MariaDB
+*.err
+*.pid
