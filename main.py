@@ -20,7 +20,7 @@ app = FastAPI()
 # JWT Secret Key and Expiry Time (loaded from .env file)
 SECRET_KEY = os.getenv("SECRET_KEY")
 ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = 30  # Token expires after 30 minutes
+ACCESS_TOKEN_EXPIRE_MINUTES = 525960  # Token expires after 30 minutes
 
 # AWS S3 Configuration (loaded from .env file)
 AWS_ACCESS_KEY_ID = os.getenv("AWS_ACCESS_KEY_ID")
@@ -42,18 +42,67 @@ s3 = boto3.client(
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="login")
 
 # Database connection for users (SQLite)
-def get_db_connection():
+def get_user_db_connection():
     conn = sqlite3.connect('users.db')
     return conn
 
-# Function to verify email and password against the database
+# Database connection for remarks and blacklist (PostgreSQL)
+def get_remarks_db_connection():
+    conn = psycopg2.connect(DB_URL)
+    return conn
+
+# Function to verify email and password against the SQLite database
 def verify_user_credentials(email: str, password: str):
-    conn = get_db_connection()
+    conn = get_user_db_connection()
     cursor = conn.cursor()
     cursor.execute("SELECT * FROM user WHERE email = ? AND password = ?", (email, password))
     user = cursor.fetchone()
     conn.close()
     return user
+
+# Function to create a new JWT token
+def create_access_token(data: dict, expires_delta: timedelta = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)):
+    to_encode = data.copy()
+    expire = datetime.utcnow() + expires_delta
+    to_encode.update({"exp": expire})
+    encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+    return encoded_jwt
+
+# Function to add a token to the blacklist
+def blacklist_token(token: str, expires_at: datetime):
+    conn = get_remarks_db_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute(
+            "INSERT INTO blacklisted_tokens (token, expires_at) VALUES (%s, %s)",
+            (token, expires_at)
+        )
+        conn.commit()
+    except psycopg2.errors.UniqueViolation:
+        # Token is already blacklisted
+        conn.rollback()
+    except Exception as e:
+        conn.rollback()
+        print(f"Error blacklisting token: {e}")
+        raise HTTPException(status_code=500, detail=f"Error blacklisting token: {str(e)}")
+    finally:
+        cursor.close()
+        conn.close()
+
+# Function to check if a token is blacklisted
+def is_token_blacklisted(token: str):
+    conn = get_remarks_db_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute("SELECT 1 FROM blacklisted_tokens WHERE token = %s", (token,))
+        result = cursor.fetchone()
+        return result is not None
+    except Exception as e:
+        print(f"Error checking blacklist: {e}")
+        raise HTTPException(status_code=500, detail=f"Error checking blacklist: {str(e)}")
+    finally:
+        cursor.close()
+        conn.close()
 
 # Function to create a new JWT token
 def create_access_token(data: dict, expires_delta: timedelta = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)):
@@ -74,25 +123,72 @@ async def login(email: str = Form(...), password: str = Form(...)):
     access_token = create_access_token(data={"sub": email})
     return {"access_token": access_token, "token_type": "bearer"}
 
+# Endpoint for user logout
+@app.post("/logout")
+async def logout(token: str = Depends(oauth2_scheme)):
+    # Decode the token to get expiration time
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        exp_timestamp = payload.get("exp")
+        if exp_timestamp is None:
+            raise HTTPException(status_code=400, detail="Token does not have expiration")
+        expires_at = datetime.utcfromtimestamp(exp_timestamp)
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(status_code=400, detail="Token has already expired")
+    except jwt.PyJWTError:
+        raise HTTPException(status_code=400, detail="Invalid token")
+    
+    # Add the token to the blacklist
+    blacklist_token(token, expires_at)
+    
+    return {"message": "Successfully logged out"}
+
+# Endpoint to fetch all asin_id, sku_id, and image_link from the asin_info table
+@app.get("/get-asin-info/")
+async def get_asin_info(token: str = Depends(oauth2_scheme)):
+    # Check if token is blacklisted
+    if is_token_blacklisted(token):
+        raise HTTPException(status_code=403, detail="Token has been revoked")
+    
+    conn = get_remarks_db_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute("SELECT asin_id, sku_id, image_link FROM asin_info")
+        rows = cursor.fetchall()
+        asin_info = [{"asin_id": row[0], "sku_id": row[1], "image_link": row[2]} for row in rows]
+        return {"asin_info": asin_info}
+    except Exception as e:
+        print(f"Error fetching asin_info: {e}")
+        raise HTTPException(status_code=500, detail=f"Error fetching asin_info: {str(e)}")
+    finally:
+        cursor.close()
+        conn.close()
+
 # Function to get the current user from the token
 def get_current_user(token: str = Depends(oauth2_scheme)):
+    # Check if token is blacklisted
+    if is_token_blacklisted(token):
+        raise HTTPException(status_code=403, detail="Token has been revoked")
+    
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
         email = payload.get("sub")
         if email is None:
             raise HTTPException(status_code=403, detail="Invalid token")
         return email
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(status_code=403, detail="Token has expired")
     except jwt.PyJWTError:
         raise HTTPException(status_code=403, detail="Invalid token")
 
 # Function to upload file to S3
-def upload_to_s3(file_data: BytesIO, file_name: str, content_type: str):
+def upload_to_s3(file_data: bytes, file_name: str, content_type: str):
     try:
         s3.put_object(
             Bucket=S3_BUCKET,
             Key=file_name,
             Body=file_data,
-            ContentType=content_type
+            ContentType=content_type,
         )
         file_url = f"https://{S3_BUCKET}.s3.{AWS_REGION}.amazonaws.com/{file_name}"
         return file_url
@@ -102,12 +198,11 @@ def upload_to_s3(file_data: BytesIO, file_name: str, content_type: str):
 
 # Function to save remark details to the PostgreSQL database
 def save_to_db(asin: str, remarks: str, image_link: str, product_link: str):
-    conn = get_db_connection()
+    conn = get_remarks_db_connection()
     cursor = conn.cursor()
-
     try:
         cursor.execute(
-            "INSERT INTO remarks (asin, remarks, image_link, product_link) VALUES (?, ?, ?, ?)",
+            "INSERT INTO remarks (asin, remarks, image_link, product_link) VALUES (%s, %s, %s, %s)",
             (asin, remarks, image_link, product_link)
         )
         conn.commit()
@@ -134,7 +229,7 @@ async def upload_remarks(
         file_name = f"screenshot-{uuid.uuid4()}{file_extension}"
 
         # Upload file to S3
-        file_url = upload_to_s3(BytesIO(file_content), file_name, file.content_type)
+        file_url = upload_to_s3(file_content, file_name, file.content_type)
 
         # Save the remark details in the database
         save_to_db(asin, remarks, file_url, product_link)
