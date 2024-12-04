@@ -10,12 +10,23 @@ from fastapi.security import OAuth2PasswordBearer
 from pydantic import BaseModel
 from datetime import datetime, timedelta
 from io import BytesIO
+from fastapi.middleware.cors import CORSMiddleware
 
 # Load environment variables from .env file
 load_dotenv()
 
 # FastAPI App
 app = FastAPI()
+
+
+# Configure CORS
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # JWT Secret Key and Expiry Time (loaded from .env file)
 SECRET_KEY = os.getenv("SECRET_KEY")
@@ -245,3 +256,33 @@ async def upload_remarks(
 @app.get("/")
 async def root():
     return {"message": "Welcome to the CRM Remarks API!"}
+
+@app.get("/get-remarks/")
+async def get_all_remarks(token: str = Depends(oauth2_scheme)):
+    # Check if token is blacklisted
+    if is_token_blacklisted(token):
+        raise HTTPException(status_code=403, detail="Token has been revoked")
+
+    conn = get_remarks_db_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute("SELECT asin, remarks, image_link, product_link FROM remarks")
+        rows = cursor.fetchall()
+
+        remarks_data = [
+            {
+                "asin": row[0],
+                "remarks": row[1],
+                "image_link": row[2],
+                "product_link": row[3]
+            }
+            for row in rows
+        ]
+
+        return {"remarks": remarks_data}
+    except Exception as e:
+        print(f"Error fetching remarks: {e}")
+        raise HTTPException(status_code=500, detail=f"Error fetching remarks: {str(e)}")
+    finally:
+        cursor.close()
+        conn.close()
