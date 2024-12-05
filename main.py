@@ -71,7 +71,9 @@ def verify_user_credentials(email: str, password: str):
 # Function to create a new JWT token (without expiration)
 def create_access_token(data: dict):
     to_encode = data.copy()
-    # No expiration time is added to the payload
+    # Add iat (issued at) and jti (unique identifier) to ensure uniqueness
+    to_encode["iat"] = datetime.utcnow().timestamp()
+    to_encode["jti"] = str(uuid.uuid4())
     encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
     return encoded_jwt
 
