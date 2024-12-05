@@ -7,7 +7,6 @@ import sqlite3
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, File, Form, UploadFile, Header, Depends
 from fastapi.security import OAuth2PasswordBearer
-from pydantic import BaseModel
 from datetime import datetime, timedelta
 from io import BytesIO
 from fastapi.middleware.cors import CORSMiddleware
@@ -18,20 +17,18 @@ load_dotenv()
 # FastAPI App
 app = FastAPI()
 
-
 # Configure CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  
+    allow_origins=["*"],  # Adjust this in production
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# JWT Secret Key and Expiry Time (loaded from .env file)
+# JWT Secret Key and Algorithm (loaded from .env file)
 SECRET_KEY = os.getenv("SECRET_KEY")
 ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = 525960  # Token expires after 30 minutes
 
 # AWS S3 Configuration (loaded from .env file)
 AWS_ACCESS_KEY_ID = os.getenv("AWS_ACCESS_KEY_ID")
@@ -71,11 +68,10 @@ def verify_user_credentials(email: str, password: str):
     conn.close()
     return user
 
-# Function to create a new JWT token
-def create_access_token(data: dict, expires_delta: timedelta = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)):
+# Function to create a new JWT token (without expiration)
+def create_access_token(data: dict):
     to_encode = data.copy()
-    expire = datetime.utcnow() + expires_delta
-    to_encode.update({"exp": expire})
+    # No expiration time is added to the payload
     encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
     return encoded_jwt
 
@@ -115,21 +111,12 @@ def is_token_blacklisted(token: str):
         cursor.close()
         conn.close()
 
-# Function to create a new JWT token
-def create_access_token(data: dict, expires_delta: timedelta = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)):
-    to_encode = data.copy()
-    expire = datetime.utcnow() + expires_delta
-    to_encode.update({"exp": expire})
-    encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
-    return encoded_jwt
-
 # Endpoint for user login, returns JWT token
 @app.post("/login")
 async def login(email: str = Form(...), password: str = Form(...)):
     user = verify_user_credentials(email, password)
     if not user:
         raise HTTPException(status_code=401, detail="Invalid credentials")
-    
     # Create JWT token upon successful login
     access_token = create_access_token(data={"sub": email})
     return {"access_token": access_token, "token_type": "bearer"}
@@ -137,21 +124,15 @@ async def login(email: str = Form(...), password: str = Form(...)):
 # Endpoint for user logout
 @app.post("/logout")
 async def logout(token: str = Depends(oauth2_scheme)):
-    # Decode the token to get expiration time
+    # Decode the token
     try:
-        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        exp_timestamp = payload.get("exp")
-        if exp_timestamp is None:
-            raise HTTPException(status_code=400, detail="Token does not have expiration")
-        expires_at = datetime.utcfromtimestamp(exp_timestamp)
-    except jwt.ExpiredSignatureError:
-        raise HTTPException(status_code=400, detail="Token has already expired")
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM], options={"verify_exp": False})
     except jwt.PyJWTError:
         raise HTTPException(status_code=400, detail="Invalid token")
-    
+    # Set a future date for expiration (e.g., 10 years from now)
+    expires_at = datetime.utcnow() + timedelta(days=365 * 10)
     # Add the token to the blacklist
     blacklist_token(token, expires_at)
-    
     return {"message": "Successfully logged out"}
 
 # Endpoint to fetch all asin_id, sku_id, and image_link from the asin_info table
@@ -160,7 +141,6 @@ async def get_asin_info(token: str = Depends(oauth2_scheme)):
     # Check if token is blacklisted
     if is_token_blacklisted(token):
         raise HTTPException(status_code=403, detail="Token has been revoked")
-    
     conn = get_remarks_db_connection()
     cursor = conn.cursor()
     try:
@@ -180,15 +160,13 @@ def get_current_user(token: str = Depends(oauth2_scheme)):
     # Check if token is blacklisted
     if is_token_blacklisted(token):
         raise HTTPException(status_code=403, detail="Token has been revoked")
-    
     try:
-        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        # Disable expiration verification
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM], options={"verify_exp": False})
         email = payload.get("sub")
         if email is None:
             raise HTTPException(status_code=403, detail="Invalid token")
         return email
-    except jwt.ExpiredSignatureError:
-        raise HTTPException(status_code=403, detail="Token has expired")
     except jwt.PyJWTError:
         raise HTTPException(status_code=403, detail="Invalid token")
 
@@ -252,11 +230,7 @@ async def upload_remarks(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Internal Server Error: {str(e)}")
 
-# Root endpoint
-@app.get("/")
-async def root():
-    return {"message": "Welcome to the CRM Remarks API!"}
-
+# Endpoint to fetch all data from the remarks table
 @app.get("/get-remarks/")
 async def get_all_remarks(token: str = Depends(oauth2_scheme)):
     # Check if token is blacklisted
@@ -286,3 +260,8 @@ async def get_all_remarks(token: str = Depends(oauth2_scheme)):
     finally:
         cursor.close()
         conn.close()
+
+# Root endpoint
+@app.get("/")
+async def root():
+    return {"message": "Welcome to the CRM Remarks API!"}
